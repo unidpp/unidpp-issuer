@@ -1,7 +1,6 @@
 //! UniDPP passport lifecycle issuer service (crate `unidpp-issuer`).
 //!
-//! Part of UniDPP (github.com/unidpp) — part of UniDPP
-//! `10-remaining-tasks-definitive.md` item 10: the service that lets an
+//! Part of UniDPP (github.com/unidpp): the service that lets an
 //! operator *run* a passport lifecycle end-to-end. The libraries prove
 //! the model; this service proves the system:
 //!
