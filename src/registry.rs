@@ -1,5 +1,5 @@
 //! Admin forwarding to a `unidpp-registry` instance (the 19135 item
-//! service, TODO.impl item 12). The issuer registers profiles and
+//! service, the UniDPP service design). The issuer registers profiles and
 //! applicability bindings with the registry over HTTP **when one is
 //! configured and reachable**; otherwise it records local fixtures so
 //! the lifecycle keeps working in development and offline demos.
