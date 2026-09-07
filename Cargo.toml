@@ -1,0 +1,32 @@
+[package]
+name = "unidpp-issuer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+description = "UniDPP passport lifecycle issuer service"
+
+# Dependency-light on purpose (mirrors the unidpp-registry /
+# unidpp-resolver doctrine): axum/tokio for serving, serde(+json) for
+# documents. All model, event, crypto, packing, and verdict machinery
+# lives in the path-dependency crates; the CLI lib supplies the shared
+# passport document type, the pack signing helpers, and the offline
+# verification pipeline (the service must never fork that logic).
+# No tracing, no metrics, no TLS stack (terminate at a fronting proxy),
+# no database (the JSONL journal is the storage).
+[dependencies]
+unidpp-model = { path = "../unidpp-core/crates/model" }
+unidpp-event = { path = "../unidpp-core/crates/event" }
+unidpp-tier-a = { path = "../unidpp-core/crates/tier_a" }
+unidpp-verdict = { path = "../unidpp-core/crates/verdict" }
+unidpp-signatif = { path = "../unidpp-signatif" }
+unidpp-cli = { path = "../unidpp-cli" }
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-thread", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Integration tests drive the real registry service (admin forwarding)
+# and hand-roll HTTP against the issuer over tokio (house pattern).
+unidpp-registry = { path = "../unidpp-registry" }
