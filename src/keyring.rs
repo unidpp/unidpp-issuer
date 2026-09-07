@@ -89,26 +89,138 @@ impl KeyringMode {
     }
 }
 
+/// The configured pack-signing suites: the deployment's sovereign
+/// co-signature policy (e.g. `ecdsa-p256` alone, `sm2` for a CN
+/// deployment, or `ecdsa-p256,sm2` to fill both carrier slots on one
+/// pack body). Order is significant — the first entry is the default
+/// anchor surfaced by the back-compat response fields.
+///
+/// Selection rules (refused loudly, never silently ignored): every
+/// suite must have real computation in this build and a core carrier
+/// slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackSuites(Vec<Suite>);
+
+impl PackSuites {
+    /// The deployment default.
+    pub const DEFAULT_TOKEN: &'static str = "ecdsa-p256";
+
+    /// Parse a comma/space-separated suite list.
+    pub fn parse(token: &str) -> Result<PackSuites, String> {
+        let mut out: Vec<Suite> = Vec::new();
+        for part in token.split([',', ' ']) {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let suite =
+                Suite::parse_token(part).map_err(|e| format!("pack suite `{part}`: {e}"))?;
+            if suite.to_core().is_none() {
+                return Err(format!(
+                    "pack suite `{part}` has no core carrier slot \
+                     (packs ride ecdsa-p256/sm2/ml-dsa-*)"
+                ));
+            }
+            if !suite.is_computed() {
+                return Err(format!(
+                    "pack suite `{part}` has no computation in this build: {}",
+                    suite.deferral().unwrap_or("computation unavailable")
+                ));
+            }
+            if !out.contains(&suite) {
+                out.push(suite);
+            }
+        }
+        if out.is_empty() {
+            return Err("at least one pack suite is required".to_string());
+        }
+        Ok(PackSuites(out))
+    }
+
+    /// The suites, in configured order.
+    pub fn as_slice(&self) -> &[Suite] {
+        &self.0
+    }
+
+    /// Collect an iterator of suites into the selection type (used by
+    /// the serving layer to re-state the keyring's policy).
+    pub fn collect_suites(suites: impl Iterator<Item = Suite>) -> PackSuites {
+        let mut out = Vec::new();
+        for suite in suites {
+            if !out.contains(&suite) {
+                out.push(suite);
+            }
+        }
+        PackSuites(out)
+    }
+
+    /// The default (first) suite.
+    pub fn default_suite(&self) -> Suite {
+        self.0[0]
+    }
+
+    /// Wire tokens, configured order.
+    pub fn tokens(&self) -> Vec<&'static str> {
+        self.0.iter().map(|s| s.as_str()).collect()
+    }
+}
+
+impl Default for PackSuites {
+    fn default() -> PackSuites {
+        PackSuites(vec![Suite::EcdsaP256])
+    }
+}
+
 /// The server keyring. Construct via [`Keyring::dev`] or
 /// [`Keyring::from_env_seeds`].
 #[derive(Debug)]
 pub struct Keyring {
     mode: KeyringMode,
     event_key: KeyPair,
-    pack_key: KeyPair,
-    /// The raw seed bytes used for the pack signer. Identical to the
-    /// bytes `unidpp_cli::packfile::sign_pack` is invoked with so the
-    /// derived public keys line up exactly.
+    /// One signing key per configured pack suite, all derived from
+    /// `pack_seed` with suite-separated material (the first is the
+    /// default suite; the collection is the co-signature set).
+    pack_keys: Vec<KeyPair>,
+    /// The raw seed bytes used for the pack signers. Identical to the
+    /// bytes `unidpp_cli::packfile::sign_pack_suites` is invoked with
+    /// so the derived public keys line up exactly.
     pack_seed: Vec<u8>,
     /// The human-readable seed that produced this keyring (only set in
     /// seeded-dev mode — env-key mode reports `None`).
     dev_seed: Option<String>,
 }
 
+/// Derive one signing key per configured suite from the base pack
+/// seed, using the CLI's suite-separation convention (P-256 verbatim —
+/// historical anchors keep verifying; every other suite
+/// domain-hashed) so the issuer's anchors and `sign_pack_suites` mint
+/// the same keys from the same seed. One convention, one place (DRY).
+fn derive_pack_keys(pack_seed: &[u8], suites: &PackSuites) -> Result<Vec<KeyPair>, String> {
+    suites
+        .as_slice()
+        .iter()
+        .map(|&suite| {
+            KeyPair::seeded(
+                suite,
+                &unidpp_cli::packfile::pack_suite_seed(pack_seed, suite),
+            )
+            .map_err(|e| format!("pack key derivation for {suite}: {e}"))
+        })
+        .collect()
+}
+
 impl Keyring {
     /// Deterministic dev-mode keyring derived from `seed`. When
     /// `seed.is_empty()`, falls back to [`DEFAULT_DEV_SEED`].
     pub fn dev(seed: Option<&str>) -> Result<Keyring, String> {
+        Self::with_pack_suites(seed, &PackSuites::default())
+    }
+
+    /// Dev-mode keyring with an explicit pack-suite policy.
+    pub fn with_pack_suites(
+        seed: Option<&str>,
+        pack_suites: &PackSuites,
+    ) -> Result<Keyring, String> {
         let dev_seed = match seed {
             Some(s) if !s.trim().is_empty() => s.trim().to_string(),
             _ => DEFAULT_DEV_SEED.to_string(),
@@ -117,13 +229,13 @@ impl Keyring {
         let pack_material = format!("unidpp-issuer/pack|{dev_seed}");
         let event_key = KeyPair::seeded(Suite::Ed25519, event_material.as_bytes())
             .map_err(|e| format!("event key derivation: {e}"))?;
-        let pack_key = KeyPair::seeded(Suite::EcdsaP256, pack_material.as_bytes())
-            .map_err(|e| format!("pack key derivation: {e}"))?;
+        let pack_seed = pack_material.into_bytes();
+        let pack_keys = derive_pack_keys(&pack_seed, pack_suites)?;
         Ok(Keyring {
             mode: KeyringMode::SeededDev,
             event_key,
-            pack_key,
-            pack_seed: pack_material.into_bytes(),
+            pack_keys,
+            pack_seed,
             dev_seed: Some(dev_seed),
         })
     }
@@ -133,6 +245,15 @@ impl Keyring {
     /// hex). `event_hex` and `pack_hex` are both required and must each
     /// decode to at least [`MIN_SEED_BYTES`] bytes.
     pub fn from_env_seeds(event_hex: &str, pack_hex: &str) -> Result<Keyring, String> {
+        Self::from_env_seeds_with(event_hex, pack_hex, &PackSuites::default())
+    }
+
+    /// Env-key mode with an explicit pack-suite policy.
+    pub fn from_env_seeds_with(
+        event_hex: &str,
+        pack_hex: &str,
+        pack_suites: &PackSuites,
+    ) -> Result<Keyring, String> {
         let event_seed = unidpp_cli::encoding::hex_decode(event_hex.trim())
             .map_err(|e| format!("event seed: not hex: {e}"))?;
         let pack_seed = unidpp_cli::encoding::hex_decode(pack_hex.trim())
@@ -151,12 +272,11 @@ impl Keyring {
         }
         let event_key = KeyPair::seeded(Suite::Ed25519, &event_seed)
             .map_err(|e| format!("event key derivation: {e}"))?;
-        let pack_key = KeyPair::seeded(Suite::EcdsaP256, &pack_seed)
-            .map_err(|e| format!("pack key derivation: {e}"))?;
+        let pack_keys = derive_pack_keys(&pack_seed, pack_suites)?;
         Ok(Keyring {
             mode: KeyringMode::EnvKey,
             event_key,
-            pack_key,
+            pack_keys,
             pack_seed,
             dev_seed: None,
         })
@@ -177,9 +297,24 @@ impl Keyring {
         &self.event_key
     }
 
-    /// The ECDSA-P256 pack-signing key.
+    /// The pack-signing keys, one per configured suite (the first is
+    /// the default suite).
+    pub fn pack_keys(&self) -> &[KeyPair] {
+        &self.pack_keys
+    }
+
+    /// The default-suite pack-signing key.
     pub fn pack_key(&self) -> &KeyPair {
-        &self.pack_key
+        &self.pack_keys[0]
+    }
+
+    /// The configured pack anchors as `(suite, public)` pairs — what a
+    /// co-signature verifier pins (one per suite).
+    pub fn pack_anchors(&self) -> Vec<(Suite, unidpp_signatif::keyring::PublicKey)> {
+        self.pack_keys
+            .iter()
+            .map(|k| (k.suite(), *k.public()))
+            .collect()
     }
 
     /// The raw pack sign seed (bytes fed to
@@ -192,7 +327,7 @@ impl Keyring {
     pub fn public(&self, role: Role) -> &PublicKey {
         match role {
             Role::Event => self.event_key.public(),
-            Role::Pack => self.pack_key.public(),
+            Role::Pack => self.pack_keys[0].public(),
         }
     }
 
@@ -200,7 +335,7 @@ impl Keyring {
     pub fn key_id(&self, role: Role) -> &KeyId {
         match role {
             Role::Event => self.event_key.key_id(),
-            Role::Pack => self.pack_key.key_id(),
+            Role::Pack => self.pack_keys[0].key_id(),
         }
     }
 
@@ -213,18 +348,41 @@ impl Keyring {
     /// hex-encoded public anchors a verifier pins.
     pub fn to_json(&self) -> Value {
         let mut roles = serde_json::Map::new();
-        for role in [Role::Event, Role::Pack] {
-            let public = self.public(role);
-            roles.insert(
-                role.as_str().to_string(),
+        roles.insert(
+            Role::Event.as_str().to_string(),
+            json!({
+                "suite": self.event_key.public().suite().to_string(),
+                "key_id": self.event_key.key_id().to_string(),
+                "public": unidpp_cli::encoding::hex_encode(self.event_key.public().as_bytes()),
+                "public_serialized": self.event_key.public().to_string(),
+            }),
+        );
+        // The pack role is a co-signature set: top-level fields keep
+        // the default suite (back-compat), `suites` carries one entry
+        // per configured suite — the anchors a sovereign verifier pins.
+        let default_key = &self.pack_keys[0];
+        let mut suites = serde_json::Map::new();
+        for key in &self.pack_keys {
+            let public = key.public();
+            suites.insert(
+                public.suite().to_string(),
                 json!({
-                    "suite": public.suite().to_string(),
-                    "key_id": self.key_id(role).to_string(),
+                    "key_id": key.key_id().to_string(),
                     "public": unidpp_cli::encoding::hex_encode(public.as_bytes()),
                     "public_serialized": public.to_string(),
                 }),
             );
         }
+        roles.insert(
+            Role::Pack.as_str().to_string(),
+            json!({
+                "suite": default_key.public().suite().to_string(),
+                "key_id": default_key.key_id().to_string(),
+                "public": unidpp_cli::encoding::hex_encode(default_key.public().as_bytes()),
+                "public_serialized": default_key.public().to_string(),
+                "suites": Value::Object(suites),
+            }),
+        );
         let mut m = serde_json::Map::new();
         m.insert("mode".into(), json!(self.mode.as_str()));
         m.insert("roles".into(), Value::Object(roles));
@@ -242,6 +400,7 @@ impl Keyring {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unidpp_signatif::sign::{SignatureSlot, SigningDomain};
 
     #[test]
     fn dev_mode_is_deterministic_and_distinct_roles() {
@@ -316,6 +475,106 @@ mod tests {
         .unwrap();
         assert_eq!(k.pack_key().public(), from_seed.public());
         assert_eq!(k.pack_seed(), b"unidpp-issuer/pack|deterministic");
+    }
+
+    #[test]
+    fn pack_suites_parse_validates_computation_and_carrier() {
+        let d = PackSuites::default();
+        assert_eq!(d.as_slice(), &[Suite::EcdsaP256]);
+        assert_eq!(d.tokens(), vec!["ecdsa-p256"]);
+
+        let sm2 = PackSuites::parse("sm2").unwrap();
+        assert_eq!(sm2.as_slice(), &[Suite::Sm2]);
+        let co = PackSuites::parse("ecdsa-p256, sm2").unwrap();
+        assert_eq!(co.as_slice(), &[Suite::EcdsaP256, Suite::Sm2]);
+        assert_eq!(co.default_suite(), Suite::EcdsaP256);
+        // Duplicates collapse; order preserved.
+        let dedup = PackSuites::parse("sm2,sm2,ecdsa-p256").unwrap();
+        assert_eq!(dedup.as_slice(), &[Suite::Sm2, Suite::EcdsaP256]);
+        assert_eq!(dedup.default_suite(), Suite::Sm2);
+        // Case and separator tolerance.
+        assert_eq!(
+            PackSuites::parse("SM2 ecdsa-p256").unwrap().as_slice(),
+            &[Suite::Sm2, Suite::EcdsaP256]
+        );
+
+        // Refusals: unknown token, no carrier slot, no computation,
+        // empty list.
+        assert!(PackSuites::parse("wat").is_err());
+        assert!(PackSuites::parse("ed25519").is_err()); // no carrier slot
+        assert!(PackSuites::parse("ml-dsa-87").is_err()); // framed-only
+        assert!(PackSuites::parse(", ,").is_err());
+    }
+
+    #[test]
+    fn multi_suite_keyring_derives_one_key_per_suite() {
+        let suites = PackSuites::parse("ecdsa-p256,sm2,ml-dsa-65").unwrap();
+        let k = Keyring::with_pack_suites(Some("seed-x"), &suites).unwrap();
+        let keys = k.pack_keys();
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[0].suite(), Suite::EcdsaP256);
+        assert_eq!(keys[1].suite(), Suite::Sm2);
+        assert_eq!(keys[2].suite(), Suite::MlDsa65);
+        // Suite-separated seeds: distinct key ids across suites.
+        let ids: Vec<_> = keys.iter().map(|key| key.key_id().to_string()).collect();
+        let set: std::collections::BTreeSet<_> = ids.iter().collect();
+        assert_eq!(set.len(), 3);
+        // The anchors line up with the CLI's minting convention: the
+        // same base seed signs and verifies.
+        let payload = unidpp_cli::packfile::signing_body(&sample_tier_a()).unwrap();
+        for key in keys {
+            let slot = SignatureSlot::sign(key, SigningDomain::ArtifactEvent, &payload).unwrap();
+            slot.verify(SigningDomain::ArtifactEvent, &payload, key.public())
+                .unwrap();
+        }
+        // The legacy default-role accessors expose the first suite.
+        assert_eq!(k.pack_key().suite(), suites.default_suite());
+        assert_eq!(k.pack_anchors().len(), 3);
+    }
+
+    #[test]
+    fn keyring_json_lists_every_pack_suite_anchor() {
+        let suites = PackSuites::parse("ecdsa-p256,sm2").unwrap();
+        let k = Keyring::with_pack_suites(Some("seed-y"), &suites).unwrap();
+        let v = k.to_json();
+        // Back-compat top-level fields: the default suite.
+        assert_eq!(v["roles"]["pack"]["suite"], "ecdsa-p256");
+        // The co-signature set: one entry per configured suite.
+        let suites_json = &v["roles"]["pack"]["suites"];
+        assert_eq!(
+            suites_json["ecdsa-p256"]["key_id"],
+            k.pack_keys()[0].key_id().to_string()
+        );
+        assert_eq!(
+            suites_json["sm2"]["key_id"],
+            k.pack_keys()[1].key_id().to_string()
+        );
+        assert!(suites_json["sm2"]["public"].as_str().unwrap().len() == 130);
+    }
+
+    fn sample_tier_a() -> unidpp_tier_a::TierAPayload {
+        let id = unidpp_model::PassportId::new("urn:unidpp:passport:keyring-test")
+            .expect("well-formed test id");
+        let mut log = unidpp_event::EventLog::new(id);
+        let event = unidpp_event::TypedEvent::new(
+            0,
+            unidpp_model::Timestamp::from_secs(1_800_000_000),
+            "issuing authority",
+            "eo-t",
+            unidpp_event::EventType::Issuance,
+            crate::events::default_payload(unidpp_event::EventType::Issuance).unwrap(),
+            unidpp_model::TrustMarker::Attested,
+        )
+        .unwrap();
+        log.append(event, None, None).unwrap();
+        unidpp_tier_a::TierAPayload::from_log(
+            &log,
+            unidpp_model::ProductIdentifier::parse("gtin:4006381333931").unwrap(),
+            "https://resolver.unidpp.org/r/test-1",
+            "eo-t",
+            unidpp_model::Interval::starting(unidpp_model::Timestamp::from_secs(1_800_000_000)),
+            vec![],
+        )
     }
 
     #[test]

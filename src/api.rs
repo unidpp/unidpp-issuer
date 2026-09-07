@@ -32,9 +32,9 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Map, Value};
 use tokio::net::TcpListener;
-use unidpp_cli::commands::verify::{verify_pack, DEFAULT_MAX_AGE_SECS};
+use unidpp_cli::commands::verify::{verify_pack_with_anchors, DEFAULT_MAX_AGE_SECS};
 use unidpp_cli::encoding::{hex_decode, hex_encode, Encoding};
-use unidpp_cli::packfile::{parse_budget, sign_pack, DEFAULT_BUDGET};
+use unidpp_cli::packfile::{parse_budget, sign_pack_suites, DEFAULT_BUDGET};
 use unidpp_cli::passport::{EventSignature, MintOptions, Passport};
 use unidpp_event::{EventType, SealedEvent, TypedEvent};
 use unidpp_model::{
@@ -140,19 +140,34 @@ impl Config {
         let pack_seed = std::env::var("UNIDPP_ISSUER_PACK_SEED")
             .ok()
             .filter(|s| !s.is_empty());
-        match (event_seed, pack_seed) {
-            (Some(event), Some(pack)) => match Keyring::from_env_seeds(&event, &pack) {
-                Ok(keyring) => config.keyring = keyring,
-                Err(e) => {
-                    eprintln!("unidpp-issuer: {e}; refusing to fall back to seeded-dev mode");
-                    std::process::exit(1);
+        let pack_suites = match std::env::var("UNIDPP_ISSUER_PACK_SUITE") {
+            Ok(token) if !token.trim().is_empty() => {
+                match crate::keyring::PackSuites::parse(&token) {
+                    Ok(suites) => suites,
+                    Err(e) => {
+                        eprintln!("unidpp-issuer: bad UNIDPP_ISSUER_PACK_SUITE: {e}");
+                        std::process::exit(1);
+                    }
                 }
-            },
+            }
+            _ => crate::keyring::PackSuites::default(),
+        };
+        match (event_seed, pack_seed) {
+            (Some(event), Some(pack)) => {
+                match Keyring::from_env_seeds_with(&event, &pack, &pack_suites) {
+                    Ok(keyring) => config.keyring = keyring,
+                    Err(e) => {
+                        eprintln!("unidpp-issuer: {e}; refusing to fall back to seeded-dev mode");
+                        std::process::exit(1);
+                    }
+                }
+            }
             (None, None) => {
                 let seed = std::env::var("UNIDPP_ISSUER_SEED")
                     .ok()
                     .filter(|s| !s.is_empty());
-                config.keyring = Keyring::dev(seed.as_deref()).expect("dev keyring derives");
+                config.keyring = Keyring::with_pack_suites(seed.as_deref(), &pack_suites)
+                    .expect("dev keyring derives");
                 warning = Some(
                     "keyring runs in seeded-dev mode; production deployments must set \
                      UNIDPP_ISSUER_EVENT_SEED and UNIDPP_ISSUER_PACK_SEED"
@@ -535,7 +550,8 @@ fn audit_event_signatures(record: &PassportRecord, key: &KeyPair) -> Value {
 fn tier_a_verdict_leg(
     record: &PassportRecord,
     pack_seed: &[u8],
-    anchor: &unidpp_signatif::keyring::PublicKey,
+    pack_suites: &[unidpp_signatif::sign::Suite],
+    anchors: &[unidpp_signatif::keyring::PublicKey],
     now: Timestamp,
     max_age: i64,
 ) -> Result<Value, Response> {
@@ -548,13 +564,13 @@ fn tier_a_verdict_leg(
         document.validity,
         Vec::new(),
     );
-    let (signed, _public, key_id) =
-        sign_pack(&payload, pack_seed).map_err(|e| bad_request(&format!("pack signing: {e}")))?;
+    let (signed, minted) = sign_pack_suites(&payload, pack_seed, pack_suites)
+        .map_err(|e| bad_request(&format!("pack signing: {e}")))?;
     let packer = TierAPacker::new(DEFAULT_BUDGET.0, DEFAULT_BUDGET.1);
     let packed = packer
         .pack(&signed)
         .map_err(|e| over_budget(&e.to_string()))?;
-    let outcome = verify_pack(packed.as_slice(), Some(anchor), now, max_age);
+    let outcome = verify_pack_with_anchors(packed.as_slice(), anchors, now, max_age);
     let summary = outcome.payload.as_ref().map(|p| {
         json!({
             "status": p.status,
@@ -580,10 +596,29 @@ fn tier_a_verdict_leg(
         },
         "payload": summary,
         "signature": {
-            "suite": Suite::EcdsaP256.to_string(),
-            "key_id": key_id.to_string(),
+            "suite": pack_suites.first().copied().unwrap_or(Suite::EcdsaP256).to_string(),
+            "key_id": minted
+                .first()
+                .map(|(_, k)| k.to_string())
+                .unwrap_or_default(),
         },
+        "signatures": minted
+            .iter()
+            .map(|(public, key_id)| {
+                json!({
+                    "suite": public.suite().to_string(),
+                    "key_id": key_id.to_string(),
+                })
+            })
+            .collect::<Vec<_>>(),
     }))
+}
+
+/// The keyring's pack-suite policy as the selection type — the
+/// keyring owns the policy (it was constructed from
+/// `UNIDPP_ISSUER_PACK_SUITE`); nothing else re-declares it.
+fn keyring_suites(keyring: &Keyring) -> crate::keyring::PackSuites {
+    crate::keyring::PackSuites::collect_suites(keyring.pack_keys().iter().map(|k| k.suite()))
 }
 
 /// Resolve the config vector against locally registered profiles.
@@ -632,7 +667,10 @@ async fn discovery(State(app): State<Arc<AppState>>) -> Result<Response, Respons
         "keyring_mode": app.config.keyring.mode().as_str(),
         "signatures": {
             "events": "ed25519 (SIGNATIF infrastructure suite)",
-            "packs": "ecdsa-p256 RFC 6979 (the computed carrier suite; Ed25519 has no Tier-A carrier slot — documented deviation in unidpp-signatif)"
+            "packs": format!(
+                "{} (configurable via UNIDPP_ISSUER_PACK_SUITE or per-request `suite`; multiple suites co-sign one pack body)",
+                keyring_suites(&app.config.keyring).tokens().join(" + ")
+            )
         },
         "as_of": {
             "query_parameter": "at (alias: asof)",
@@ -882,6 +920,14 @@ async fn mint_pack(
         None => Encoding::Hex,
     };
     let sign = opt_bool(&v, "sign")?.unwrap_or(true);
+    // Suite selection: the body's `suite` (single token or
+    // comma-separated co-signature list) overrides the deployment
+    // policy for this pack.
+    let suites = match opt_str(&v, "suite")?.or(opt_str(&v, "suites")?) {
+        Some(token) => crate::keyring::PackSuites::parse(&token)
+            .map_err(|e| bad_request(&format!("`suite`: {e}")))?,
+        None => keyring_suites(&app.config.keyring),
+    };
     let now = Timestamp::now();
     let found = {
         let store = app.store.lock().expect("store poisoned");
@@ -899,18 +945,25 @@ async fn mint_pack(
         document.validity,
         Vec::new(),
     );
-    let (payload, signature) = if sign {
-        let (signed, _public, key_id) = sign_pack(&payload, app.config.keyring.pack_seed())
-            .map_err(|e| bad_request(&format!("pack signing: {e}")))?;
+    let (payload, signatures) = if sign {
+        let (signed, minted) =
+            sign_pack_suites(&payload, app.config.keyring.pack_seed(), suites.as_slice())
+                .map_err(|e| bad_request(&format!("pack signing: {e}")))?;
         (
             signed,
-            json!({
-                "suite": Suite::EcdsaP256.to_string(),
-                "key_id": key_id.to_string(),
-            }),
+            minted
+                .iter()
+                .map(|(public, key_id)| {
+                    json!({
+                        "suite": public.suite().to_string(),
+                        "key_id": key_id.to_string(),
+                        "anchor": unidpp_cli::encoding::hex_encode(public.as_bytes()),
+                    })
+                })
+                .collect::<Vec<Value>>(),
         )
     } else {
-        (payload, Value::Null)
+        (payload, Vec::new())
     };
     let packer = TierAPacker::new(budget.0, budget.1);
     let packed = packer
@@ -928,8 +981,21 @@ async fn mint_pack(
             "qr_version": packed.version,
             "ec": budget.0,
             "margin": packed.margin(),
-            "signature": signature,
+            "signature": signatures.first().cloned().unwrap_or(Value::Null),
+            "signatures": signatures,
             "anchor": app.config.keyring.public_hex(Role::Pack),
+            "anchors": app
+                .config
+                .keyring
+                .pack_anchors()
+                .into_iter()
+                .map(|(suite, public)| {
+                    (
+                        suite.to_string(),
+                        json!(unidpp_cli::encoding::hex_encode(public.as_bytes())),
+                    )
+                })
+                .collect::<serde_json::Map<String, Value>>(),
         }),
         now,
     ))
@@ -975,10 +1041,18 @@ async fn passport_verdict(
     let verdict = builder.build();
 
     let event_audit = audit_event_signatures(&record, app.config.keyring.event_key());
+    let anchors: Vec<unidpp_signatif::keyring::PublicKey> = app
+        .config
+        .keyring
+        .pack_anchors()
+        .into_iter()
+        .map(|(_, public)| public)
+        .collect();
     let tier_a = tier_a_verdict_leg(
         &record,
         app.config.keyring.pack_seed(),
-        app.config.keyring.public(Role::Pack),
+        keyring_suites(&app.config.keyring).as_slice(),
+        &anchors,
         now,
         max_age,
     )?;

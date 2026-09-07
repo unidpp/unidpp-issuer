@@ -19,7 +19,7 @@ unidpp-model = { path = "../unidpp-core/crates/model" }
 unidpp-event = { path = "../unidpp-core/crates/event" }
 unidpp-tier-a = { path = "../unidpp-core/crates/tier_a" }
 unidpp-verdict = { path = "../unidpp-core/crates/verdict" }
-unidpp-signatif = { path = "../unidpp-signatif" }
+unidpp-signatif = { path = "../unidpp-signatif", features = ["sm2", "ml-dsa"] }
 unidpp-cli = { path = "../unidpp-cli" }
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-thread", "time"] }
