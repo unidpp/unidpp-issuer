@@ -201,6 +201,25 @@ async fn create_passport_returns_id_and_empty_log() {
     assert_eq!(get(base, "/healthz").await.status, 200);
     let keyring = json_of(&get(base, "/keyring").await);
     assert_eq!(keyring["mode"], "seeded-dev");
+    // public_serialized is the suite-certain ANCHOR: suite:public-hex
+    // that verify --anchor parses — never the fingerprint grammar.
+    let pack_pub = keyring["roles"]["pack"]["public"].as_str().unwrap();
+    let pack_ser = keyring["roles"]["pack"]["public_serialized"]
+        .as_str()
+        .unwrap();
+    let (suite_token, suite_hex) = pack_ser.split_once(':').expect("suite:hex");
+    assert_eq!(suite_token, "ecdsa-p256");
+    assert_eq!(
+        suite_hex, pack_pub,
+        "the serialization carries the key bytes"
+    );
+    let event_ser = keyring["roles"]["event"]["public_serialized"]
+        .as_str()
+        .unwrap();
+    assert!(
+        !event_ser.contains(keyring["roles"]["event"]["key_id"].as_str().unwrap()),
+        "not the fingerprint grammar"
+    );
     assert!(keyring["roles"]["event"]["key_id"]
         .as_str()
         .unwrap()

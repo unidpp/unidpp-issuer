@@ -354,7 +354,7 @@ impl Keyring {
                 "suite": self.event_key.public().suite().to_string(),
                 "key_id": self.event_key.key_id().to_string(),
                 "public": unidpp_cli::encoding::hex_encode(self.event_key.public().as_bytes()),
-                "public_serialized": self.event_key.public().to_string(),
+                "public_serialized": self.event_key.public().to_serialized(),
             }),
         );
         // The pack role is a co-signature set: top-level fields keep
@@ -369,7 +369,7 @@ impl Keyring {
                 json!({
                     "key_id": key.key_id().to_string(),
                     "public": unidpp_cli::encoding::hex_encode(public.as_bytes()),
-                    "public_serialized": public.to_string(),
+                    "public_serialized": public.to_serialized(),
                 }),
             );
         }
@@ -379,7 +379,7 @@ impl Keyring {
                 "suite": default_key.public().suite().to_string(),
                 "key_id": default_key.key_id().to_string(),
                 "public": unidpp_cli::encoding::hex_encode(default_key.public().as_bytes()),
-                "public_serialized": default_key.public().to_string(),
+                "public_serialized": default_key.public().to_serialized(),
                 "suites": Value::Object(suites),
             }),
         );
