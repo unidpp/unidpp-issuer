@@ -801,12 +801,20 @@ async fn get_passport(
 /// GET /passports — the listing (ids + subjects + capability classes).
 /// What an admin surface enumerates; the per-passport GET carries the
 /// document.
-async fn list_passports(State(app): State<Arc<AppState>>) -> Result<Response, Response> {
-    let listing: Vec<Value> = {
+async fn list_passports(
+    State(app): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, Response> {
+    // The pagination contract of the registry's /items: a window into
+    // a register that grows without bound; `count` stays the TOTAL.
+    let (limit, offset) = window(&params)?;
+    let (count, page): (usize, Vec<Value>) = {
         let store = app.store.lock().expect("store poisoned");
-        store
-            .passports()
+        let all = store.passports();
+        let page = all
             .iter()
+            .skip(offset)
+            .take(limit)
             .map(|record| {
                 let document = &record.document;
                 json!({
@@ -817,18 +825,37 @@ async fn list_passports(State(app): State<Arc<AppState>>) -> Result<Response, Re
                     "events": document.log.sealed().len(),
                 })
             })
-            .collect()
+            .collect();
+        (all.len(), page)
     };
-    let count = listing.len();
     Ok(stamped(
         StatusCode::OK,
         &json!({
             "count": count,
-            "passports": listing,
+            "limit": limit,
+            "offset": offset,
+            "passports": page,
             "as_of_note": "current state; the per-passport GET serves point-in-time",
         }),
         Timestamp::now(),
     ))
+}
+
+/// The limit/offset window: default 100, hard cap 500, floor 1; a
+/// non-numeric value is a 400 (the caller asked for something the
+/// contract does not mean).
+fn window(params: &HashMap<String, String>) -> Result<(usize, usize), Response> {
+    let parse = |key: &str, default: usize| -> Result<usize, Response> {
+        match params.get(key) {
+            None => Ok(default),
+            Some(raw) => raw
+                .parse::<usize>()
+                .map_err(|_| bad_request(&format!("`{key}` must be a non-negative integer"))),
+        }
+    };
+    let limit = parse("limit", 100)?.clamp(1, 500);
+    let offset = parse("offset", 0)?;
+    Ok((limit, offset))
 }
 
 /// POST /passports/{id}/events — append a typed event; the server signs

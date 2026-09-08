@@ -139,6 +139,31 @@ async fn list_passports_enumerates_every_created_passport() {
 
     let listing = json_of(&get(base, "/passports").await);
     assert_eq!(listing["count"], 2);
+    assert_eq!(listing["limit"], 100, "the default window");
+    assert_eq!(listing["offset"], 0);
+    // Pagination: a window into the register, count stays the TOTAL.
+    let page = json_of(&get(base, "/passports?limit=1").await);
+    assert_eq!(page["count"], 2);
+    assert_eq!(page["limit"], 1);
+    assert_eq!(page["passports"].as_array().unwrap().len(), 1);
+    let second = json_of(&get(base, "/passports?limit=1&offset=1").await);
+    assert_eq!(second["count"], 2);
+    assert_eq!(second["passports"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        page["passports"][0]["passport_id"], second["passports"][0]["passport_id"],
+        "offset advances the window"
+    );
+    let beyond = json_of(&get(base, "/passports?offset=99").await);
+    assert_eq!(beyond["count"], 2);
+    assert_eq!(
+        beyond["passports"].as_array().unwrap().len(),
+        0,
+        "past the end: empty page"
+    );
+    // The cap and the contract violations.
+    let capped = json_of(&get(base, "/passports?limit=9999").await);
+    assert_eq!(capped["limit"], 500, "the hard cap");
+    assert_eq!(get(base, "/passports?limit=zero").await.status, 400);
     let listed: Vec<&str> = listing["passports"]
         .as_array()
         .unwrap()
