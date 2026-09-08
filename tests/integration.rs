@@ -123,6 +123,42 @@ async fn create_default(base: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn list_passports_enumerates_every_created_passport() {
+    let server = spawn_open().await;
+    let base = &server.base_url;
+
+    let empty = json_of(&get(base, "/passports").await);
+    assert_eq!(empty["count"], 0, "a fresh issuer lists zero passports");
+
+    let first = json_of(&post(base, "/passports", &create_body(), None).await);
+    let second = json_of(&post(base, "/passports", &create_body(), None).await);
+    let ids = [
+        first["passport_id"].as_str().unwrap(),
+        second["passport_id"].as_str().unwrap(),
+    ];
+
+    let listing = json_of(&get(base, "/passports").await);
+    assert_eq!(listing["count"], 2);
+    let listed: Vec<&str> = listing["passports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["passport_id"].as_str().unwrap())
+        .collect();
+    // Sorted by id (the store's stable order), every row carries the
+    // subject fields.
+    let mut sorted = ids.to_vec();
+    sorted.sort();
+    assert_eq!(listed, sorted, "listed in id order");
+    for row in listing["passports"].as_array().unwrap() {
+        assert!(row["product_id"].is_string());
+        assert_eq!(row["capability"], "passive-auth", "the model's wire token");
+        assert!(row["eo_id"].is_string());
+        assert_eq!(row["events"], 0);
+    }
+}
+
+#[tokio::test]
 async fn create_passport_returns_id_and_empty_log() {
     let server = spawn_open().await;
     let base = &server.base_url;

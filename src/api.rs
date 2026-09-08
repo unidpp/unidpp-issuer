@@ -652,6 +652,7 @@ async fn discovery(State(app): State<Arc<AppState>>) -> Result<Response, Respons
         "description": "UniDPP passport lifecycle issuer service: create passports, append server-signed typed events, mint Tier-A packs with real signatures, run full-pipeline verdicts",
         "endpoints": {
             "create_passport": "POST /passports",
+        "list_passports": "GET /passports",
             "append_event": "POST /passports/{id}/events",
             "mint_pack": "POST /passports/{id}/pack",
             "passport": "GET /passports/{id}?at=",
@@ -795,6 +796,39 @@ async fn get_passport(
         Some(record) => Ok(stamped(StatusCode::OK, &passport_view(&record, at), as_of)),
         None => Err(not_found()),
     }
+}
+
+/// GET /passports — the listing (ids + subjects + capability classes).
+/// What an admin surface enumerates; the per-passport GET carries the
+/// document.
+async fn list_passports(State(app): State<Arc<AppState>>) -> Result<Response, Response> {
+    let listing: Vec<Value> = {
+        let store = app.store.lock().expect("store poisoned");
+        store
+            .passports()
+            .iter()
+            .map(|record| {
+                let document = &record.document;
+                json!({
+                    "passport_id": document.passport_id.as_str(),
+                    "product_id": document.product_id.to_string(),
+                    "capability": document.capability.to_string(),
+                    "eo_id": document.eo_id,
+                    "events": document.log.sealed().len(),
+                })
+            })
+            .collect()
+    };
+    let count = listing.len();
+    Ok(stamped(
+        StatusCode::OK,
+        &json!({
+            "count": count,
+            "passports": listing,
+            "as_of_note": "current state; the per-passport GET serves point-in-time",
+        }),
+        Timestamp::now(),
+    ))
 }
 
 /// POST /passports/{id}/events — append a typed event; the server signs
@@ -1332,7 +1366,7 @@ pub fn router(app: Arc<AppState>) -> Router {
         .route("/", get(discovery))
         .route("/healthz", get(healthz))
         .route("/keyring", get(keyring))
-        .route("/passports", post(create_passport))
+        .route("/passports", post(create_passport).get(list_passports))
         .route("/passports/{id}", get(get_passport))
         .route("/passports/{id}/events", post(append_event))
         .route("/passports/{id}/pack", post(mint_pack))
