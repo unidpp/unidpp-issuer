@@ -649,6 +649,8 @@ fn config_resolution(store: &Store, record: &PassportRecord) -> Value {
 async fn discovery(State(app): State<Arc<AppState>>) -> Result<Response, Response> {
     let doc = json!({
         "service": "unidpp-issuer",
+        "version": env!("CARGO_PKG_VERSION"),
+        "build_id": option_env!("UNIDPP_BUILD_ID").unwrap_or("dev"),
         "description": "UniDPP passport lifecycle issuer service: create passports, append server-signed typed events, mint Tier-A packs with real signatures, run full-pipeline verdicts",
         "endpoints": {
             "create_passport": "POST /passports",
