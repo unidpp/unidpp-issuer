@@ -1,0 +1,358 @@
+components: {}
+info:
+  description: 'UniDPP passport lifecycle issuer service: the service creates passports from an identity, a type reference, a config vector and a capability class, appends server-signed typed events (Ed25519; illegal status transitions are rejected per invariant I6), mints Tier-A offline packs with real multi-suite signatures under QR budget enforcement, renders the document-plus-manifest view, and runs the full-pipeline verdict with its coverage. Profile registrations and applicability bindings are recorded locally and forwarded to the configured `unidpp-registry` instance, with local fixtures when no registry is configured or reachable. Every response is as-of stamped (`x-as-of` header plus an `as_of` body field); not-found responses are no-information, with identical bytes for unknown passports (I12); mutations require `Authorization: Bearer <UNIDPP_ISSUER_ADMIN_TOKEN>` where a token is configured.'
+  license:
+    identifier: Apache-2.0
+    name: Apache-2.0
+  title: UniDPP issuer
+  version: 0.1.0
+  x-unidpp-env-keys:
+  - UNIDPP_ISSUER_BIND
+  - UNIDPP_ISSUER_ADMIN_TOKEN
+  - UNIDPP_ISSUER_STATE_FILE
+  - UNIDPP_ISSUER_REGISTRY_URL
+  - UNIDPP_ISSUER_REGISTRY_TOKEN
+  - UNIDPP_ISSUER_MAX_AGE
+  - UNIDPP_ISSUER_EVENT_SEED
+  - UNIDPP_ISSUER_PACK_SEED
+  - UNIDPP_ISSUER_PACK_SUITE
+  - UNIDPP_ISSUER_SEED
+openapi: 3.1.0
+paths:
+  /:
+    get:
+      operationId: discovery
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The discovery document: the service identity and build, the endpoint index, the keyring mode, the signature suites for events and packs, the as-of stamping convention, the authentication posture and the registry configuration'
+      summary: Serve the discovery document.
+      tags:
+      - issuance
+  /admin/applicability:
+    get:
+      operationId: applicability_query
+      parameters:
+      - description: The product type whose bindings are in force
+        in: query
+        name: product_type
+        required: true
+        schema:
+          type: string
+      - description: An RFC 3339 instant; the bindings are evaluated as of that instant (alias `asof`)
+        in: query
+        name: at
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The product type and the count and records of the bindings in force at the requested instant
+        '400':
+          description: A missing `product_type` or an invalid `at` instant
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: Serve the applicability bindings in force for a product type.
+      tags:
+      - admin
+    post:
+      operationId: bind_applicability
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: '`profile_id` and `product_type` are required; optional `profile_version`, `effective_from` (RFC 3339, default now), `effective_until` (must not precede `effective_from`), and `retroactive` (default false)'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: {}
+          description: 'The binding is recorded: the stored binding, the transport used (`registry` or the fixtures fallback), the registry response when a live registry answered, and the audit sequence are stated'
+        '400':
+          description: An invalid body, a profile that is not registered here, an `effective_until` preceding `effective_from`, or a registry rejection of the forwarded binding
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: Bind a profile to a product type.
+      tags:
+      - admin
+  /admin/log:
+    get:
+      operationId: admin_log
+      parameters:
+      - description: Records to return (default 100, maximum 10 000)
+        in: query
+        name: limit
+        required: false
+        schema:
+          minimum: 0
+          type: integer
+      - description: Records to skip (default 0)
+        in: query
+        name: offset
+        required: false
+        schema:
+          minimum: 0
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The journal window: every recorded mutation of every passport, profile and binding, in recording order'
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: Serve the append-only audit log, paged.
+      tags:
+      - admin
+  /admin/profiles:
+    get:
+      operationId: list_profiles
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The count and the locally registered profiles with their definitions, versions, registers, jurisdictions, data points and registration instants
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: List the locally registered profiles.
+      tags:
+      - admin
+    post:
+      operationId: register_profile
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: '`profile_id` and `definition` are required; optional `version` (default `1.0.0`), `register_id`, `jurisdiction`, and `data_points` (an array of non-empty strings)'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: {}
+          description: 'The profile is registered: the stored record, the transport used (`registry` or the fixtures fallback), the registry response when a live registry answered, and the audit sequence are stated'
+        '400':
+          description: An invalid body, a registry rejection of the forwarded registration, or a profile id already registered here
+        '401':
+          description: A bearer token is configured and the request does not carry it
+        '409':
+          description: The profile id is already registered here
+      summary: Register a profile locally and forward it to the configured registry.
+      tags:
+      - admin
+  /healthz:
+    get:
+      operationId: healthz
+      responses:
+        '200':
+          description: The service is serving
+      summary: Serve the liveness probe.
+      tags:
+      - issuance
+  /keyring:
+    get:
+      operationId: keyring
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The keyring''s public side: the event key and every pack key, each with its suite, key identifier and public value'
+      summary: Serve the public anchors a verifier pins.
+      tags:
+      - issuance
+  /passports:
+    get:
+      operationId: list_passports
+      parameters:
+      - description: Records per page (default 100, cap 500, floor 1)
+        in: query
+        name: limit
+        required: false
+        schema:
+          minimum: 0
+          type: integer
+      - description: Records to skip (default 0)
+        in: query
+        name: offset
+        required: false
+        schema:
+          minimum: 0
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The page: the total count (independent of the window), the window parameters and the passport summaries (passport id, product identity, capability class, economic-operator identity, event count); the listing is current-state'
+        '400':
+          description: A non-numeric `limit` or `offset`
+      summary: List the issued passports, paged.
+      tags:
+      - issuance
+    post:
+      operationId: create_passport
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: 'The creation request: `identity` (aliases `product_id` and `id`) is required; optional `granularity`, `capability` (`S0`-`S3` or a canonical name, default `S0`), `type_ref` (alias `type`), `eo_id`, `resolver_uri`, `passport_id` (default: the content- and time-derived identity), `valid_from` and `valid_to` (RFC 3339), and `config` (alias `configuration`; a non-empty string or an array of non-empty strings)'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: {}
+          description: 'The passport is created: the passport id, the schema, the product identity and granularity, the type reference, the config vector, the capability class, the economic-operator identity, the resolver URI, the validity interval, the empty log and the audit sequence are stated'
+        '400':
+          description: An invalid body, an unparseable product identity, an unknown granularity or capability token, a rejected passport document, or a config vector that is not an array of non-empty strings
+        '401':
+          description: A bearer token is configured and the request does not carry it
+        '409':
+          description: The passport id is already registered
+      summary: Create a passport from the identity, the type reference, the config vector and the capability class.
+      tags:
+      - issuance
+  /passports/{id}:
+    get:
+      operationId: get_passport
+      parameters:
+      - description: The passport id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: An RFC 3339 instant; the document is rendered as of that instant (alias `asof`)
+        in: query
+        name: at
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The passport view: the document loadable by `unidpp pack`/`verify` verbatim, plus the config vector, the replayed status and safety state, the custodian when stated, the log head, the event count and the as-of stamp'
+        '400':
+          description: An invalid `at` instant
+        '404':
+          description: 'The no-information 404: unknown passports answer the byte-identical body (I12)'
+      summary: 'Render the passport document: the core, the manifest layer and the log head.'
+      tags:
+      - issuance
+  /passports/{id}/events:
+    post:
+      operationId: append_event
+      parameters:
+      - description: The passport id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: '`type` is required (a typed-event token); optional `data` (alias `payload`; the event class''s default payload is used when it has one), `at` (RFC 3339, default now), `actor` (default: the passport''s economic operator), `actor_role` (default: the event class''s appender role), and `sign` (default true; a false value leaves the event unsigned)'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: {}
+          description: 'The event is appended: the sequence number, the event type, the occurred-at instant, the actor, the trust marker, the signature record, the log head, the resulting status and safety state and the audit sequence are stated'
+        '400':
+          description: An invalid body, an unknown event type, a rejected payload, or a missing `data` where the event class has no default payload
+        '401':
+          description: A bearer token is configured and the request does not carry it
+        '404':
+          description: The passport is not known here (the no-information 404)
+        '409':
+          description: The event's status transition is illegal (I6) or the sequence collides
+      summary: Append a typed event to a passport's log; the server signs it, and illegal status transitions are rejected (I6).
+      tags:
+      - issuance
+  /passports/{id}/pack:
+    post:
+      operationId: mint_pack
+      parameters:
+      - description: The passport id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: 'The mint options, all optional (an empty body is accepted): `budget` (error-correction level and version), `encoding` (default `hex`), `sign` (default true), and `suite` (alias `suites`; one token or a comma-separated co-signature list overriding the deployment policy for this pack)'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: {}
+          description: 'The pack is minted over the passport log: the encoded pack, the byte budget accounting (used, projected, QR version, margin), the signature records with their anchors and the keyring anchors are stated'
+        '400':
+          description: An invalid body, an unknown budget, encoding or suite token, or a pack signing failure
+        '404':
+          description: The passport is not known here (the no-information 404)
+        '413':
+          description: The pack exceeds the requested QR budget
+      summary: Mint the Tier-A offline pack with a real carrier signature and QR budget enforcement.
+      tags:
+      - issuance
+  /passports/{id}/verdict:
+    get:
+      operationId: passport_verdict
+      parameters:
+      - description: The passport id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: An RFC 3339 instant; the verdict is computed as of that instant (alias `asof`)
+        in: query
+        name: at
+        required: false
+        schema:
+          type: string
+      - description: 'The freshness window of the Tier-A verdict leg in seconds (default: the deployment''s `UNIDPP_ISSUER_MAX_AGE`; `0` selects static/archival semantics)'
+        in: query
+        name: max_age
+        required: false
+        schema:
+          format: int64
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The verdict and its coverage: the log verdict, the event-signature audit (every recorded signature re-verified against the keyring anchor), the Tier-A carrier leg (grade, findings, readings, coverage, freshness, trust marker, byte accounting) and the config resolution'
+        '400':
+          description: An invalid `at` or `max_age`, or a pack signing failure in the carrier leg
+        '404':
+          description: The passport is not known here (the no-information 404)
+        '413':
+          description: The Tier-A carrier leg exceeds the QR budget
+      summary: Run the full-pipeline verdict for a passport and state its coverage.
+      tags:
+      - issuance
+tags:
+- description: 'Discovery, health, the public keyring and the passport lifecycle: creation, event appendage, pack minting, the document view and the verdict'
+  name: issuance
+- description: 'The operator surface: profile registration, applicability binding and the audit log'
+  name: admin
