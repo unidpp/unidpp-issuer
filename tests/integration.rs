@@ -857,10 +857,18 @@ async fn admin_forwards_to_a_live_registry_and_falls_back_to_fixtures() {
         .as_str()
         .unwrap()
         .contains("eu-espr-battery-v3"));
-    // The registry actually holds the item.
+    // The registry actually holds the item — in its SIGNED manifest
+    // form (PR-1): the issuer's declaration, signed in the Profile
+    // domain.
     let item = json_of(&get(&registry.base_url, "/profiles/eu-espr-battery-v3").await);
     assert_eq!(item["identifier"], "eu-espr-battery-v3");
     assert_eq!(item["item_class"], "profile");
+    let manifest = &item["manifest"];
+    assert_eq!(manifest["issuer_class"], "declaration");
+    assert!(
+        manifest["signature"]["signature"].as_str().unwrap_or("").len() > 32,
+        "the forwarded manifest carries the issuer's signature: {manifest}"
+    );
 
     let resp = post(
         base,

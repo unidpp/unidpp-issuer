@@ -1261,7 +1261,7 @@ async fn passport_verdict(
     post,
     path = "/admin/profiles",
     tag = "admin",
-    request_body(content = Value, description = "`profile_id` and `definition` are required; optional `version` (default `1.0.0`), `register_id`, `jurisdiction`, and `data_points` (an array of non-empty strings)"),
+    request_body(content = Value, description = "`profile_id` and `definition` are required; optional `version` (default `1.0.0`), `register_id`, `jurisdiction`, `issuer_class` (default `declaration`), and `data_points` (an array of non-empty strings). The registration is forwarded in its signed form: the issuer composes the manifest and signs it in the Profile domain"),
     responses(
         (status = 201, description = "The profile is registered: the stored record, the transport used (`registry` or the fixtures fallback), the registry response when a live registry answered, and the audit sequence are stated", body = Value, content_type = "application/json"),
         (status = 400, description = "An invalid body, a registry rejection of the forwarded registration, or a profile id already registered here"),
@@ -1283,6 +1283,8 @@ async fn register_profile(
     let version = opt_str(&v, "version")?.unwrap_or_else(|| "1.0.0".to_string());
     let register_id = opt_str(&v, "register_id")?;
     let jurisdiction = opt_str(&v, "jurisdiction")?;
+    let issuer_class = opt_str(&v, "issuer_class")?
+        .unwrap_or_else(|| "declaration".to_string());
     let data_points = match v.get("data_points") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => {
@@ -1311,6 +1313,30 @@ async fn register_profile(
         data_points,
         registered_at: now,
     };
+    // The signed manifest (PR-1): the issuer, as the signing node,
+    // declares the profile and signs the manifest's bytes in the
+    // Profile domain — the registry registers profiles only in this
+    // form.
+    let key = app.config.keyring.event_key();
+    let mut manifest = json!({
+        "version": version,
+        "issuer_class": issuer_class,
+        "issuer": key.key_id().to_string(),
+    });
+    let payload = serde_json::to_vec(&manifest)
+        .map_err(|e| bad_request(&format!("manifest serialization: {e}")))?;
+    let slot = SignatureSlot::sign(key, SigningDomain::Profile, &payload)
+        .map_err(|e| bad_request(&format!("profile signing failed: {e}")))?;
+    let signature_hex = slot
+        .signature
+        .as_deref()
+        .map(hex_encode)
+        .unwrap_or_default();
+    manifest["signature"] = json!({
+        "suite": slot.suite.to_string(),
+        "key_id": slot.key_id.to_string(),
+        "signature": signature_hex,
+    });
     // Forward first (a rejection from a live registry must surface
     // before anything is journaled), then journal locally.
     let forward_body = json!({
@@ -1320,6 +1346,7 @@ async fn register_profile(
         "definition": definition,
         "version": version,
         "submitting_organization": "unidpp-issuer",
+        "manifest": manifest,
     });
     let outcome: RegistryOutcome = app
         .registry
