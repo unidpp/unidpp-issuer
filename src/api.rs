@@ -1283,8 +1283,7 @@ async fn register_profile(
     let version = opt_str(&v, "version")?.unwrap_or_else(|| "1.0.0".to_string());
     let register_id = opt_str(&v, "register_id")?;
     let jurisdiction = opt_str(&v, "jurisdiction")?;
-    let issuer_class = opt_str(&v, "issuer_class")?
-        .unwrap_or_else(|| "declaration".to_string());
+    let issuer_class = opt_str(&v, "issuer_class")?.unwrap_or_else(|| "declaration".to_string());
     let data_points = match v.get("data_points") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => {

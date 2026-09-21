@@ -866,7 +866,11 @@ async fn admin_forwards_to_a_live_registry_and_falls_back_to_fixtures() {
     let manifest = &item["manifest"];
     assert_eq!(manifest["issuer_class"], "declaration");
     assert!(
-        manifest["signature"]["signature"].as_str().unwrap_or("").len() > 32,
+        manifest["signature"]["signature"]
+            .as_str()
+            .unwrap_or("")
+            .len()
+            > 32,
         "the forwarded manifest carries the issuer's signature: {manifest}"
     );
 
