@@ -109,6 +109,82 @@ impl ProfileRegistry for RegistryClient {
     }
 }
 
+/// The embedder's bridge: the registry module's own axum router
+/// served through tower. Both registrations keep the loopback
+/// client's outcome semantics (2xx registry, transport failure
+/// unreachable, rejection verbatim) — by construction. The bearer is
+/// the same forwarded token the HTTP client would have sent (the
+/// registry's admin guard stays in force on the in-process path).
+pub struct InProcessRegistry {
+    pub router: axum::Router,
+    pub bearer: Option<String>,
+}
+
+impl InProcessRegistry {
+    async fn forward(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<RegistryOutcome, String> {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(bearer) = &self.bearer {
+            request = request.header("authorization", format!("Bearer {bearer}"));
+        }
+        let request = request
+            .body(axum::body::Body::from(body.to_string()))
+            .map_err(|e| format!("registry forward request: {e}"))?;
+        use tower::util::ServiceExt;
+        let resp = match ServiceExt::oneshot(&mut self.router.clone(), request).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                return Ok(RegistryOutcome {
+                    mode: RegistryMode::Unreachable,
+                    detail: Some(format!("registry not reachable: {e}")),
+                })
+            }
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+            .await
+            .map_err(|e| format!("registry forward body: {e}"))?;
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        if status.is_success() {
+            Ok(RegistryOutcome {
+                mode: RegistryMode::Registry,
+                detail: Some(text),
+            })
+        } else {
+            Err(format!(
+                "registry rejected the registration ({}): {}",
+                status, text
+            ))
+        }
+    }
+}
+
+impl ProfileRegistry for InProcessRegistry {
+    fn register_profile<'a>(
+        &'a self,
+        body: &'a serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<RegistryOutcome, String>> + Send + 'a>,
+    > {
+        Box::pin(async move { self.forward("/profiles", body).await })
+    }
+
+    fn bind_applicability<'a>(
+        &'a self,
+        body: &'a serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<RegistryOutcome, String>> + Send + 'a>,
+    > {
+        Box::pin(async move { self.forward("/applicability", body).await })
+    }
+}
+
 /// The registry forwarder.
 #[derive(Debug, Clone)]
 pub struct RegistryClient {
@@ -213,6 +289,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.mode, RegistryMode::Fixtures);
+    }
+
+    #[tokio::test]
+    async fn the_bridge_reports_a_rejection_verbatim() {
+        // An empty router answers 404: a mounted-but-negative service
+        // is a rejection (surfaced verbatim), not unreachability.
+        let bridge = InProcessRegistry {
+            router: axum::Router::new(),
+            bearer: None,
+        };
+        let err = bridge
+            .register_profile(&serde_json::json!({ "register_id": "r" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("rejected the registration (404"), "got: {err}");
     }
 
     #[tokio::test]

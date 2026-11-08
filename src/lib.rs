@@ -44,5 +44,5 @@ pub mod store;
 
 pub use api::{run, Config, TestServer};
 pub use keyring::{Keyring, KeyringMode};
-pub use registry::{RegistryClient, RegistryMode, RegistryOutcome};
+pub use registry::{InProcessRegistry, RegistryClient, RegistryMode, RegistryOutcome};
 pub use store::{Op, PassportRecord, Store, StoreError};
