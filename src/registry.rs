@@ -70,6 +70,45 @@ impl RegistryOutcome {
 /// registry degrades to fixtures rather than hanging the request).
 pub const FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The transport boundary of the issuer→registry edge (REARCH R7):
+/// exactly the two registrations the issuer forwards, nothing more.
+/// The default implementation is the loopback HTTP client
+/// ([`RegistryClient`]); an embedder — the one deployment — injects
+/// an in-process bridge instead, and the edge stops touching sockets.
+pub trait ProfileRegistry: Send + Sync {
+    fn register_profile<'a>(
+        &'a self,
+        body: &'a serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<RegistryOutcome, String>> + Send + 'a>,
+    >;
+    fn bind_applicability<'a>(
+        &'a self,
+        body: &'a serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<RegistryOutcome, String>> + Send + 'a>,
+    >;
+}
+
+impl ProfileRegistry for RegistryClient {
+    fn register_profile<'a>(
+        &'a self,
+        body: &'a serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<RegistryOutcome, String>> + Send + 'a>,
+    > {
+        Box::pin(async move { RegistryClient::register_profile(self, body).await })
+    }
+    fn bind_applicability<'a>(
+        &'a self,
+        body: &'a serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<RegistryOutcome, String>> + Send + 'a>,
+    > {
+        Box::pin(async move { RegistryClient::bind_applicability(self, body).await })
+    }
+}
+
 /// The registry forwarder.
 #[derive(Debug, Clone)]
 pub struct RegistryClient {

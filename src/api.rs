@@ -210,20 +210,34 @@ pub struct AppState {
     /// The passport/profile/binding store behind the audit journal.
     pub store: Mutex<Store>,
     /// Registry forwarder (fixtures when unconfigured/unreachable).
-    pub registry: RegistryClient,
+    /// A trait object since REARCH R7: the default is the loopback
+    /// HTTP client; the one deployment injects an in-process bridge.
+    pub registry: std::sync::Arc<dyn crate::registry::ProfileRegistry>,
 }
 
 impl AppState {
     /// Assemble state from a config (replaying the journal when set).
     pub fn new(config: Config) -> std::io::Result<AppState> {
         let store = Store::open(config.state_file.as_deref())?;
-        let registry =
-            RegistryClient::new(config.registry_url.clone(), config.registry_token.clone());
+        let registry: std::sync::Arc<dyn crate::registry::ProfileRegistry> = std::sync::Arc::new(
+            RegistryClient::new(config.registry_url.clone(), config.registry_token.clone()),
+        );
         Ok(AppState {
             config,
             store: Mutex::new(store),
             registry,
         })
+    }
+
+    /// Swap the registry transport (REARCH R7): the one deployment
+    /// injects an in-process bridge so the issuer forwards to its
+    /// sibling module without a socket.
+    pub fn with_registry_bridge(
+        mut self,
+        bridge: std::sync::Arc<dyn crate::registry::ProfileRegistry>,
+    ) -> Self {
+        self.registry = bridge;
+        self
     }
 }
 
