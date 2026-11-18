@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use unidpp_event::intake::example_data;
 use unidpp_event::EventType;
-use unidpp_issuer::events::example_data;
 use unidpp_issuer::http::{json_request, HttpResponse};
 use unidpp_issuer::{Config, TestServer};
 

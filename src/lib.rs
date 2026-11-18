@@ -36,7 +36,6 @@
 #![allow(clippy::result_large_err)]
 
 pub mod api;
-pub mod events;
 pub mod http;
 pub mod keyring;
 pub mod registry;

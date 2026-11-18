@@ -41,10 +41,10 @@ use unidpp_verdict::{Reading, VerdictBuilder};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::events::{default_payload, payload_from_data};
 use crate::keyring::{Keyring, Role};
 use crate::registry::{RegistryClient, RegistryOutcome};
 use crate::store::{BindingRecord, PassportRecord, ProfileRecord, Store, StoreError};
+use unidpp_event::intake::{default_payload, payload_from_data};
 
 /// Deployment configuration (environment-driven; see `main.rs`).
 /// Deliberately not `Clone`: the keyring holds secret-side key material.

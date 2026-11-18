@@ -562,7 +562,7 @@ mod tests {
             "issuing authority",
             "eo-t",
             unidpp_event::EventType::Issuance,
-            crate::events::default_payload(unidpp_event::EventType::Issuance).unwrap(),
+            unidpp_event::intake::default_payload(unidpp_event::EventType::Issuance).unwrap(),
             unidpp_model::TrustMarker::Attested,
         )
         .unwrap();
